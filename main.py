@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import ttk
 import pyperclip
 import webbrowser
 import keyboard
@@ -7,6 +8,8 @@ import time
 import threading
 import sys
 import signal
+import json
+import os
 from PIL import Image, ImageGrab, ImageDraw
 import io
 import win32clipboard
@@ -14,6 +17,7 @@ import win32gui
 import win32con
 import pystray
 from pystray import MenuItem as item
+from history import HistoryManager
 
 try:
     import uiautomation as auto
@@ -25,13 +29,35 @@ except ImportError:
 pyautogui.FAILSAFE = False
 
 # ================= CONFIGURATION =================
-CONFIG = {
-    "HOTKEY": "ctrl+alt+g",
-    "EXIT_HOTKEY": "ctrl+alt+q",
-    "GEMINI_URL": "https://gemini.google.com/app",
-    "PASTE_DELAY_NEW": 6.0,   
-    "PASTE_DELAY_REUSE": 1.5, 
-}
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+def load_config():
+    """Load configuration from JSON file."""
+    default_config = {
+        "HOTKEY": "ctrl+alt+g",
+        "EXIT_HOTKEY": "ctrl+alt+q",
+        "GEMINI_URL": "https://gemini.google.com/app",
+        "PASTE_DELAY_NEW": 6.0,
+        "PASTE_DELAY_REUSE": 1.5,
+        "MAX_HISTORY": 10,
+    }
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+                return {
+                    "HOTKEY": user_config.get("hotkey", default_config["HOTKEY"]),
+                    "EXIT_HOTKEY": user_config.get("exit_hotkey", default_config["EXIT_HOTKEY"]),
+                    "GEMINI_URL": user_config.get("gemini_url", default_config["GEMINI_URL"]),
+                    "PASTE_DELAY_NEW": user_config.get("paste_delay_new", default_config["PASTE_DELAY_NEW"]),
+                    "PASTE_DELAY_REUSE": user_config.get("paste_delay_reuse", default_config["PASTE_DELAY_REUSE"]),
+                    "MAX_HISTORY": user_config.get("max_history", default_config["MAX_HISTORY"]),
+                }
+    except Exception as e:
+        print(f"Failed to load config: {e}")
+    return default_config
+
+CONFIG = load_config()
 # =================================================
 
 class GeminiDesktopTool:
@@ -39,10 +65,12 @@ class GeminiDesktopTool:
         self.should_exit = False
         self.should_show_popup = False
         self.reuse_session = True  # Remember last reuse checkbox state
+        self.history_manager = HistoryManager(max_items=CONFIG.get("MAX_HISTORY", 10))
         self.colors = {
             'bg': '#1e1e2e', 'fg': '#cdd6f4', 'accent': '#89b4fa',
             'secondary': '#313244', 'input_bg': '#45475a', 
-            'text_dim': '#6c7086', 'success': '#a6e3a1'
+            'text_dim': '#6c7086', 'success': '#a6e3a1', 'warning': '#f9e2af',
+            'error': '#f38ba8'
         }
 
     def set_clipboard_image(self, image):
@@ -237,7 +265,27 @@ class GeminiDesktopTool:
             main = tk.Frame(root, bg=self.colors['bg'], padx=25, pady=15)
             main.pack(fill=tk.BOTH, expand=True)
 
-            tk.Label(main, text="INSTRUCTION", bg=self.colors['bg'], fg=self.colors['accent'], font=("Segoe UI", 8, "bold")).pack(anchor='w')
+            # Instruction header with history dropdown
+            inst_header = tk.Frame(main, bg=self.colors['bg'])
+            inst_header.pack(fill=tk.X)
+            tk.Label(inst_header, text="INSTRUCTION", bg=self.colors['bg'], fg=self.colors['accent'], font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT)
+            
+            # History dropdown
+            history_items = self.history_manager.get_recent(5)
+            if history_items:
+                history_var = tk.StringVar(value="📜 Recent...")
+                history_menu = ttk.Combobox(inst_header, textvariable=history_var, state="readonly", width=25)
+                history_menu['values'] = ["📜 Recent..."] + [h['instruction'][:40] + "..." if len(h['instruction']) > 40 else h['instruction'] for h in history_items]
+                history_menu.pack(side=tk.RIGHT)
+                
+                def on_history_select(event):
+                    idx = history_menu.current()
+                    if idx > 0:  # Skip the placeholder
+                        desc_entry.delete("1.0", tk.END)
+                        desc_entry.insert("1.0", history_items[idx-1]['instruction'])
+                        history_var.set("📜 Recent...")
+                history_menu.bind("<<ComboboxSelected>>", on_history_select)
+            
             desc_entry = tk.Text(main, height=3, bg=self.colors['input_bg'], fg=self.colors['fg'], insertbackground='white', font=("Segoe UI", 10), relief='flat', padx=10, pady=8)
             desc_entry.pack(fill=tk.X, pady=(5, 12))
             desc_entry.insert("1.0", "")
@@ -397,6 +445,12 @@ class GeminiDesktopTool:
             tk.Button(btn_frame, text="📷 ADD SCREENSHOT", command=do_screenshot, bg=self.colors['secondary'], fg=self.colors['fg'], relief='flat', padx=12, pady=8).pack(side=tk.LEFT)
             tk.Button(btn_frame, text="📋 PASTE IMG", command=refresh_from_clipboard, bg=self.colors['secondary'], fg=self.colors['fg'], relief='flat', padx=12, pady=8).pack(side=tk.LEFT, padx=10)
             
+            def clear_all_images():
+                images_list.clear()
+                update_image_preview()
+            
+            tk.Button(btn_frame, text="🗑️ CLEAR", command=clear_all_images, bg=self.colors['error'], fg=self.colors['bg'], relief='flat', padx=12, pady=8).pack(side=tk.LEFT)
+            
             def on_send():
                 instruction = desc_entry.get('1.0', tk.END).strip()
                 content = content_entry.get('1.0', tk.END).strip()
@@ -407,11 +461,30 @@ class GeminiDesktopTool:
                     full_text = instruction or content
                 reuse = reuse_var.get()
                 self.reuse_session = reuse  # Remember for next time
+                
+                # Save instruction to history
+                if instruction:
+                    self.history_manager.add(instruction, content)
+                
                 imgs = images_list.copy()  # Copy the list
                 root.destroy()
                 threading.Thread(target=self.run_automation, args=(full_text, imgs, reuse), daemon=True).start()
 
             tk.Button(btn_frame, text="SEND TO GEMINI", command=on_send, bg=self.colors['accent'], fg=self.colors['bg'], font=("Segoe UI", 9, "bold"), relief='flat', padx=25, pady=8).pack(side=tk.RIGHT)
+            
+            # Keyboard shortcuts hint
+            hint_frame = tk.Frame(main, bg=self.colors['bg'])
+            hint_frame.pack(fill=tk.X, pady=(10, 0))
+            tk.Label(hint_frame, text="💡 Ctrl+Enter: Send | Esc: Close | Right-click image: Remove", 
+                    bg=self.colors['bg'], fg=self.colors['text_dim'], font=("Segoe UI", 8)).pack()
+            
+            # Bind keyboard shortcuts
+            def on_ctrl_enter(event):
+                on_send()
+                return "break"
+            
+            root.bind("<Control-Return>", on_ctrl_enter)
+            root.bind("<Escape>", lambda e: root.destroy())
             
             print("  Popup ready.")
             root.mainloop()

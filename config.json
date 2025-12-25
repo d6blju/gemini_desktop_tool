@@ -1,0 +1,9 @@
+{
+    "hotkey": "ctrl+alt+g",
+    "exit_hotkey": "ctrl+alt+q",
+    "gemini_url": "https://gemini.google.com/app",
+    "paste_delay_new": 6.0,
+    "paste_delay_reuse": 1.5,
+    "max_history": 10,
+    "language": "en"
+}

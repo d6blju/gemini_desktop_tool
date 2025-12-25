@@ -16,3 +16,6 @@ dist/
 .env
 venv/
 env/
+
+# User data (generated at runtime)
+history.json
